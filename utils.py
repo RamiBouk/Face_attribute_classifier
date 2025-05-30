@@ -1,15 +1,18 @@
-import pandas as pd
+import os
 import torch
+
 import torch.nn as nn
+import pandas as pd
+from tqdm import tqdm
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import torchvision.models as models
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
-import os
 from sklearn.model_selection import train_test_split
-from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
-import torchvision.models as models
-from tqdm import tqdm
-import numpy as np
 
 class FacialAttributeDataset(Dataset):
     def __init__(self, dataframe, root_dir, transform=None):
@@ -40,6 +43,33 @@ class FacialAttributeDataset(Dataset):
             image = self.transform(image)
             
         return image, torch.tensor(labels, dtype=torch.float32)
+
+class inferenceDataset(Dataset):
+    def __init__(self, dataframe, root_dir, transform=None):
+        """
+        Args:
+            dataframe (pd.DataFrame): DataFrame with image paths
+            root_dir (str): Directory with all the images
+            transform (callable, optional): Optional transform to be applied on a sample
+        """
+        self.dataframe = dataframe
+        self.root_dir = root_dir
+        self.transform = transform
+        
+    def __len__(self):
+        return len(self.dataframe)
+    
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+            
+        img_path = os.path.join(self.root_dir, self.dataframe.iloc[idx]['image_path'])
+        image = Image.open(img_path).convert('RGB')
+
+        if self.transform:
+            image = self.transform(image)
+            
+        return image
 
 class MultiTaskLoss(nn.Module):
     def __init__(self, task_weights=None, class_weights=None):
@@ -125,7 +155,7 @@ class MultiTaskFacialAttributeClassifier(nn.Module):
 
         }
 
-################## HELPER  FUNCTIONS ##################
+################## Training HELPER  FUNCTIONS ##################
 
 def train_epoch(model, train_loader, criterion, optimizer, device):
     """Train the model for one epoch"""
@@ -493,3 +523,96 @@ def find_optimal_threshold(probabilities, targets, num_thresholds=100):
             optimal_threshold = threshold
     
     return optimal_threshold, best_hter, None
+
+##################### EVALUATION Helper FUNCTIONS #####################
+def calculate_hter_for_threshold(y_true, y_pred_probs, threshold):
+    """Calculate HTER for a given threshold"""
+    y_pred = (y_pred_probs >= threshold).astype(int)
+    
+    # Calculate FAR and FRR
+    tp = ((y_pred == 1) & (y_true == 1)).sum()
+    fp = ((y_pred == 1) & (y_true == 0)).sum()
+    tn = ((y_pred == 0) & (y_true == 0)).sum()
+    fn = ((y_pred == 0) & (y_true == 1)).sum()
+    
+    # Avoid division by zero
+    far = fp / (fp + tn) if (fp + tn) > 0 else 0
+    frr = fn / (fn + tp) if (fn + tp) > 0 else 0
+    hter = (far + frr) / 2
+    
+    return hter, far, frr
+
+def find_optimal_threshold_single_task(y_true, y_pred_probs, thresholds=None):
+    """Find optimal threshold that minimizes HTER for a single task"""
+    if thresholds is None:
+        thresholds = np.linspace(0, 1, 101)
+    
+    best_hter = float('inf')
+    best_threshold = 0.5
+    hter_values = []
+    
+    for threshold in thresholds:
+        hter, far, frr = calculate_hter_for_threshold(y_true, y_pred_probs, threshold)
+        hter_values.append(hter)
+        
+        if hter < best_hter:
+            best_hter = hter
+            best_threshold = threshold
+    
+    return best_threshold, best_hter, thresholds, hter_values
+
+def visualize_hter_analysis(df):
+    """Visualize HTER analysis for all classes"""
+    classes = ['glasses', 'hat', 'facial_hair', 'label']
+    
+    # Set up the plotting style
+    plt.style.use('default')
+    sns.set_palette("husl")
+    
+    # Create subplots
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle('HTER Analysis for Multi-Task Classification', fontsize=16, fontweight='bold')
+    
+    # Flatten axes for easier indexing
+    axes = axes.flatten()
+    
+    # Store results for summary
+    results_summary = []
+    
+    # Plot HTER curves for each class
+    for i, class_name in enumerate(classes):
+        y_true = df[class_name].values
+        y_pred_probs = df[f'{class_name}_logit'].values
+        
+        # Find optimal threshold and HTER values
+        opt_thresh, opt_hter, thresholds, hter_values = find_optimal_threshold_single_task(y_true, y_pred_probs)
+        
+        # Plot HTER curve
+        axes[i].plot(thresholds, hter_values, linewidth=2, label=f'{class_name.capitalize()} HTER')
+        axes[i].axvline(x=opt_thresh, color='red', linestyle='--', alpha=0.7, 
+                       label=f'Optimal Threshold: {opt_thresh:.3f}')
+        axes[i].axhline(y=opt_hter, color='red', linestyle=':', alpha=0.7, 
+                       label=f'Min HTER: {opt_hter:.4f}')
+        
+        axes[i].set_xlabel('Threshold')
+        axes[i].set_ylabel('HTER')
+        axes[i].set_title(f'{class_name.capitalize()} - HTER vs Threshold')
+        axes[i].grid(True, alpha=0.3)
+        axes[i].legend()
+        axes[i].set_xlim(0, 1)
+        
+        # Store results
+        results_summary.append({
+            'Class': class_name.capitalize(),
+            'Optimal_Threshold': opt_thresh,
+            'Min_HTER': opt_hter,
+            'HTER_at_0.5': hter_values[50]  # HTER at threshold 0.5
+        })
+    
+    # Create summary bar chart
+    results_df = pd.DataFrame(results_summary)
+    
+    # Bar chart of optimal HTER values
+    axes[4].bar(results_df['Class'], results_df['Min_HTER'], alpha=0.7, color='skyblue', edgecolor='navy')
+    axes[4].set_ylabel('HTER')
+    axes[4].set_title('Optimal HTER by Class')
