@@ -64,7 +64,6 @@ The evaluation process includes threshold optimization for each classification h
 ├── label_train.txt       # iInitial labels for the training set
 ├── label_val.txt         # Predictions on the provided test set
 ├── labeled_data.csv      # Final labeled training data with binary attributes
-# Final labeled training data with binary attributes
 ├── checkpoints/
 │   ├── train_split.csv   # Training set split used for model development
 │   ├── val_split.csv     # Validation set split used for model development
